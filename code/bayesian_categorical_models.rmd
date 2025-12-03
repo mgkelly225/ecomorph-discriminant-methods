@@ -1,0 +1,1784 @@
+---
+title: "Astragalus Bayesian Categorical Models"
+author: "Maddie Kelly"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=F}
+library(tidyverse)
+library(readxl)
+library(ggrepel)
+library(patchwork)
+
+### below are needed for phylogenetic analyses
+library(ape)
+library(phytools)
+library(geiger)
+library(motmot)
+library(class)
+library(lattice)
+library(mda)
+library(nnet)
+
+### for Bayesian
+library(brms)
+library(tidybayes)
+library(bayesplot)
+```
+
+
+# Bayesian Model to Predict Habitat Category
+Data needed here: bovid dataset with PC scores, plus phylogeny
+```{r}
+# most recent bovid data with PC scores
+astragali_info <- read_csv("out/modern_astragali_post_gm_2025-10-29.csv")
+
+# pruned phylogeny with only species in astragali_info
+zurano_phy <- read.nexus(file = "data/zurano_tree_pruned_edited")
+```
+
+Set habitat category variable as a factor with the right order. We want Open to be the first category, grading upwards in woody cover to Forest. So Open = 1, Light Cover = 2, Heavy Cover = 3, and Forest = 4.
+```{r}
+astragali_info$Habitat <- as.factor(astragali_info$Habitat)
+levels(astragali_info$Habitat)
+astragali_info$Habitat <- factor(astragali_info$Habitat, levels = c("O", "LC", "HC", "F"), ordered = TRUE)
+```
+
+```{r, message=F, warning=F, echo=F}
+# plot of counts of each habitat category
+hab_histo <- ggplot(astragali_info) +
+  geom_histogram(aes(x = Habitat, fill = Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG")+
+  theme_classic()+
+  ggtitle("Empirical habitat distribution")+
+  theme(legend.position = "none")
+```
+
+```{r, echo=F, message=F, warning=F}
+# Plot of cumulative proportions:
+hab_cumulative_prop <- astragali_info %>%
+  count(Habitat) %>%
+  mutate(prop_hab = n/nrow(astragali_info),
+         cum_prop_hab = cumsum(prop_hab)) %>%
+  ggplot(aes(x = Habitat, y = cum_prop_hab, fill = Habitat))+
+  geom_line(aes(group = 1), color = "gray40")+
+  geom_point(shape = 21, size = 3, stroke = 1, color = "white")+
+  scale_fill_brewer(palette = "BrBG")+
+  ylab("cumulative proportion")+
+  scale_y_continuous(breaks = c(0, 0.5, 1.0), limits = c(0,1))+
+  theme_classic()+
+  theme(legend.position = "none")
+```
+
+
+In log-cumulative-odds:
+```{r}
+logit <- function(x) log(x / (1-x))
+
+astragali_info %>%
+  count(Habitat) %>%
+  mutate(prop_hab = n/nrow(astragali_info),
+         cum_prop_hab = cumsum(prop_hab),
+         alpha = logit(cum_prop_hab) %>% round(digits = 2))
+```
+
+```{r, echo=F, warning=F, message=F}
+hab_log_cumulative_odds <- astragali_info %>%
+  count(Habitat) %>%
+  mutate(prop_hab = n/nrow(astragali_info),
+         cum_prop_hab = cumsum(prop_hab)) %>%
+  filter(Habitat != "F") %>% # filter out forest because the logit cumulative probability is infinity
+  ggplot(aes(x = Habitat, y = logit(cum_prop_hab), fill = Habitat))+
+  geom_line(aes(group = 1), color = "gray40")+
+  geom_point(shape = 21, size = 3, stroke = 1, color = "white")+
+  scale_fill_manual(values = c("#a6611a", "#dfc27d", "#80cdc1"))+
+  ylab("log-cumulative-odds")+
+  ylim(c(-2,2.5))+
+  theme_classic()+
+  theme(legend.position = "none")
+```
+
+```{r, echo=F}
+(hab_histo | hab_cumulative_prop | hab_log_cumulative_odds)+
+  plot_annotation(title = "Empirical distributions of habitat categories")
+```
+
+The majority of astragali are from open and light cover habitats. The model should pick up that forest and heavy cover are relatively rare within the dataset.
+
+### Intercepts only model
+Intercepts only model, just to get a feel for the different parts of the model structure, starting at the most basic. Mathematically, this is: 
+$$ \mathrm{habitat}_i \sim \mathrm{Categorical}(\textbf{p}) $$
+$$ \mathrm{logit}(p_k) = \alpha_k - \phi $$
+$$ \phi = 0 $$
+$$ \alpha_k \sim \mathrm{Normal}(0, 1.5) $$
+```{r}
+# need to define some start values for the intercepts so the model can get going. McElreath says the exact values aren't super important, but the order is
+inits <- list("Intercept[1]" = -1,
+              "Intercept[2]" = 0,
+              "Intercept[3]" = 1)
+inits_list <- list(inits, inits, inits, inits) # 4 copies for 4 MCMC chains?
+
+# sample priors only first
+intercept_only_prior_check <- brm(data = astragali_info,
+                            family = cumulative(),
+                            Habitat ~ 1,
+                            prior(normal(0,1.5), class = "Intercept"),
+                            iter = 2000, warmup = 1000, cores = 4, chains = 4,
+                            init = inits_list,
+                            sample_prior = "only",
+                            file = "models/intercept_only_categorical_prior_check")
+intercept_only_prior_check
+```
+
+Check what the prior looks like:
+```{r}
+pp_check(intercept_only_prior_check, ndraws = 100)
+```
+
+Run the intercepts only model on the data:
+```{r}
+# give it the real data now
+intercept_only_model <- brm(data = astragali_info,
+                            family = cumulative(),
+                            Habitat ~ 1,
+                            prior(normal(0,1.5), class = "Intercept"),
+                            iter = 2000, warmup = 1000, cores = 4, chains = 4,
+                            init = inits_list,
+                            file = "models/intercept_only_categorical")
+
+intercept_only_model
+```
+
+Posterior predictive check:
+```{r}
+pp_check(intercept_only_model, ndraws = 100)
+```
+
+
+ESS and Rhats look good, and the intercepts look close to the empirical values, which we can see by summarizing those parameters on the probability scale:
+```{r}
+as_draws_df(intercept_only_model) %>%
+  mutate_at(vars(starts_with("b_")), inv_logit_scaled) %>%
+  pivot_longer(starts_with("b_")) %>%
+  group_by(name) %>%
+  summarise(mean = mean(value),
+            sd = sd(value),
+            ll = quantile(value, probs = .025),
+            ul = quantile(value, probs = 0.975))
+```
+
+Plot the intercepts and their 95% posterior compatibility intervals on the log-odds scale: 
+```{r}
+fixef(intercept_only_model) %>%
+  data.frame() %>%
+  rownames_to_column("intercept") %>%
+  mutate(Habitat = c("O", "LC", "HC") %>% as.factor()) %>%
+  ggplot(aes(x = reorder(Habitat, order(Estimate)), y = Estimate, ymin = Q2.5, ymax = Q97.5, fill = Habitat))+
+  geom_line(aes(group = 1), color = "gray40")+
+  geom_linerange(color = "gray40")+
+  geom_point(shape = 21, size = 3, stroke = 1, color = "white")+
+  scale_fill_manual(values = c("#80cdc1", "#dfc27d", "#a6611a"))+
+  ylab("log-cumulative-odds (posterior)")+
+  xlab("Habitat")+
+  theme_classic()+
+  theme(legend.position = "none")
+```
+
+### PCs as varying slopes
+The next step is to add some parameters to the linear model, the $\phi$ term. The model can be expressed mathematically as:
+$$ \mathrm{habitat}_i \sim \mathrm{Categorical}(\textbf{p}) $$
+$$ \mathrm{logit}(p_k) = \alpha_k - \phi $$
+$$ \phi = \beta_{\mathrm{PC_x}}*\mathrm{PC_x} $$ 
+$$ \alpha_k \sim \mathrm{Normal}(0, 1.5) $$
+$$ \beta \sim \mathrm{Normal}(0, 0.5) $$
+This is saying that the $\phi$ parameter should vary as a function of the PC scores, with each PC having a different $\beta$ value. Those $\beta$ (slope) parameters are given a Normal(0, 0.5) prior to start. 
+
+Wrangle the dataset a bit so that all the PC scores are in one column
+```{r}
+astragali_pc_scaled <- astragali_info %>% mutate_at(vars(starts_with("Comp")), .funs = scale) # center and scale each PC score column first
+astragali_pivot <- astragali_pc_scaled %>% pivot_longer(starts_with("Comp"), names_to = "PC") # pivot so that all the PC scores are in one column (named value) and the corresponding PC is represented in the "PC" column
+```
+
+Now we need an ordered logit function:
+```{r}
+logistic <- function(x) {
+  p <- 1 / (1 + exp(-x))
+  p <- ifelse(x == Inf, 1, p)
+  p
+}
+
+# this will allow estimation of the individual probabilities of each response grouping, given the parameters from a model output
+dordlogit <- function(x, phi, a, log = FALSE) {
+  a <- c(as.numeric(a), Inf)
+  p <- logistic(a[x] - phi)
+  na <- c(-Inf, a)
+  np <- logistic(na[x] - phi)
+  p <- p - np
+  if(log == TRUE) p <- log(p)
+  p
+}
+```
+
+Using this on our intercepts only model fit returns the individual probabilities for each habitat category, on the probability scale:
+```{r}
+round(dordlogit(1:4, 0, fixef(intercept_only_model)[,1]), digits = 2)
+```
+
+Now trying to code this into a model and run a prior predictive check:
+```{r}
+# what are the default priors
+get_prior(formula = Habitat ~ 1 + (0 + value | PC), data = astragali_pivot, family = cumulative)
+
+pc_model_prior <- brm(data = astragali_pivot,
+                family = cumulative,
+                Habitat ~ 1 + (0 + value | PC),
+                prior = c(prior(normal(0, 1.5), class = Intercept), # same intercept prior
+                          prior(gamma(2,10), class = sd)), # regularizing prior for the sd of the PC slopes (for now, used in iso models)
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                sample_prior = "only",
+                seed = 239,
+                file = "models/pc_model_prior")
+
+
+pc_model_prior
+```
+Only one divergent transition, but otherwise the ESS and Rhat values look good. Maybe increasing adapt_delta in future runs will fix this. But I'm not hugely concerned about this right now given that the other parameters look fine.
+
+Posterior predictive check:
+```{r}
+pp_check(pc_model_prior, ndraws = 100)
+```
+
+Priors look very reasonable.
+
+Running the model on the full dataset. Increasing adapt_delta here to 0.99 to try and mitigate any divergent transitions.
+```{r}
+pc_model <- brm(data = astragali_pivot,
+                family = cumulative,
+                Habitat ~ 1 + (0 + value | PC),
+                prior = c(prior(normal(0, 1.5), class = Intercept), # same intercept prior
+                          prior(gamma(2,10), class = sd)), # regularizing prior for the sd of the PC slopes (for now, used in iso models)
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                control = list(adapt_delta = 0.99),
+                seed = 239,
+                file = "models/pc_model")
+
+
+pc_model
+```
+Although this took ~ 30 minutes to run, there were no divergent transitions, and the ESS and Rhat values look good. Awesome.
+
+```{r}
+pp_check(pc_model, ndraws = 100)
+```
+
+Adding the PCs leads to a VERY close fit with the data. Scary! Is this just because there's a lot of data, or does this mean that the predictions will be bad? 
+
+Examining the model parameters:
+```{r}
+set.seed(1349)
+pc_model_post <- as_draws_df(pc_model) # 6000 random draws from the posterior
+```
+
+Varying slopes for PCs:
+
+```{r, fig.height=11, message=F, warning=F, echo=F}
+pc_model_post %>% 
+  dplyr::select(`r_PC[Comp1,value]`:`r_PC[Comp9,value]`) %>%
+  pivot_longer(`r_PC[Comp1,value]`:`r_PC[Comp9,value]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("random effects of PCs (log-odds)") +
+  theme_classic(base_size = 16)
+```
+
+So the posterior intervals for these parameters are VERY wide. Only a handful of the PCs seem to have any non-zero effect: PCs 6, 1, 5, 7, and maybe 2. Everything else seems like it's just adding noise. What do posterior predictions look like?
+
+Posterior predictions?
+```{r}
+set.seed(1349)
+pc_model_post_pred <- posterior_epred(pc_model, ndraws = 1000)
+pc_model_post_pred %>% str() # this is a 3D array. 1000 rows correspond to posterior draws, with values in the probability metric (not cumulative probability). 7208 columns represent unique combinations of specimen and PC. 4 levels of 4th dimension correspond to 4 levels of the habitat variable.
+```
+
+```{r}
+# need to wrangle that for plotting
+new_names <- paste(astragali_pivot$Spec.number, astragali_pivot$PC, sep = "-")
+pc_model_post_pred_clean <- rbind(pc_model_post_pred[,,1],
+                                  pc_model_post_pred[,,2],
+                                  pc_model_post_pred[,,3],
+                                  pc_model_post_pred[,,4]) %>%
+  data.frame() %>%
+  set_names(new_names) %>%
+  mutate(habitat_post = rep(1:4, each = n()/4),
+         draw = rep(1:1000, times = 4))%>% 
+  pivot_longer(-c(draw, habitat_post),
+               names_to = c("Spec.no", "PC"), 
+               names_sep = "-",
+               values_to = "pk")
+
+glimpse(pc_model_post_pred_clean)
+```
+
+```{r}
+pc_model_post_cp <- pc_model_post_pred_clean %>% 
+  filter(habitat_post < 4) %>%
+  group_by(draw, Spec.no, PC) %>%
+  arrange(draw, Spec.no, habitat_post) %>%
+  mutate(probability = cumsum(pk)) %>%
+  ungroup() %>%
+  nest(data = -draw) %>%
+  slice_sample(n = 50) %>%
+  unnest(data)
+
+glimpse(pc_model_post_cp)
+```
+
+The plots below are showing the individual probabilities of membership in the first 3 categories for a couple of specimens, predicted by each PC. This is horrible to look at, I know, but it illustrates that most PCs alone are not useful predictors.
+```{r, fig.height=10, fig.width = 8, echo=F}
+# just plot one specimen probabilities for each habitat category predicted by each PC
+pc_model_post_cp$habitat_post <- as.factor(pc_model_post_cp$habitat_post)
+levels <- unique(pc_model_post_cp$PC)
+
+# FMNH 127892, Alcelaphus buselaphus, Open
+pc_model_post_cp %>% filter(Spec.no == "FMNH_127892") %>%
+  mutate(PC = factor(PC, levels=levels)) %>%
+  ggplot(aes(x = pk, y = PC, color = habitat_post))+
+  stat_pointinterval()+
+  scale_color_manual(values = c("#a6611a", "#dfc27d", "#80cdc1"))+
+  xlim(0,1)+
+  facet_wrap(~ habitat_post)+
+  ggtitle("FMNH 127982, Alcelaphus buselaphus, Open")+
+  theme_classic()
+
+# FMNH 128010, Tragelaphus scriptus, Forest
+pc_model_post_cp %>% filter(Spec.no == "FMNH_128010") %>%
+  mutate(PC = factor(PC, levels=levels)) %>%
+  ggplot(aes(x = pk, y = PC, color = habitat_post))+
+  stat_pointinterval()+
+  scale_color_manual(values = c("#a6611a", "#dfc27d", "#80cdc1"))+
+  xlim(0,1)+
+  facet_wrap(~ habitat_post)+
+  ggtitle("FMNH 128010, Tragelaphus scriptus, Forest")+
+  theme_classic()
+```
+
+I want to know what habitat category is predicted for each specimen:
+```{r}
+set.seed(1349)
+pc_model_predict <- predict(pc_model, ndraws = 1000, scale = "Habitat")
+str(pc_model_predict)
+
+pc_model_predict <- bind_cols(pc_model_predict, astragali_pivot$Spec.number)
+colnames(pc_model_predict)[5] <- "Specimen_ID"
+pc_model_predict <- bind_cols(pc_model_predict, astragali_pivot$Habitat)
+colnames(pc_model_predict)[6] <- "True habitat"
+pc_model_predict$predicted_habitat <- apply(pc_model_predict[,1:4], MARGIN = 1, FUN = which.max)
+
+ggplot(data = pc_model_predict)+
+  geom_histogram(aes(x = predicted_habitat), stat = "count")
+```
+
+I think what's happening here is because all the PCs are being used, some of the signal is being washed out. And everything is being predicted as open or light cover.
+
+### v2: Use only the PCs with the largest slope values
+I want to try and revise this model and only use the few PCs that were informative in this one. That way maybe the signal will be cleaner and posterior predictions will be better? It's interesting to note here that the PCs that come up as stronger predictors in this model (6, 5, 1, 7, 2) are also the best predictors in the CVA for separating along CV1 and CV2. So there's something there. This time I'm also just going to write the linear model as:
+$$  \phi = \beta_{\mathrm{PC_1}}*\mathrm{PC_1} + \beta_{\mathrm{PC_2}}*\mathrm{PC_2} + \beta_{\mathrm{PC_5}}*\mathrm{PC_5} + \beta_{\mathrm{PC_6}}*\mathrm{PC_6} + \beta_{\mathrm{PC_7}}*\mathrm{PC_7} $$
+This way I can generate one set of cumulative probabilities per specimen, instead of one set per PC per specimen. No pooling of slope estimates this time.
+
+Prior predictive check:
+```{r}
+pc_model_prior_v2 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                Habitat ~ 1 + Comp1 + Comp2 + Comp5 + Comp6 + Comp7,
+                prior = c(prior(normal(0, 1.5), class = Intercept), # same intercept prior
+                          prior(normal(0,0.5), class = b)), # regularizing prior for slopes
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                sample_prior = "only",
+                seed = 475,
+                file = "models/pc_model_prior_v2")
+
+
+pc_model_prior_v2
+```
+
+```{r}
+pp_check(pc_model_prior_v2, ndraws = 100)
+```
+
+Priors look fine (not skewed, so starting with even prior probability for every group). Now to run the model on the data.
+
+```{r}
+pc_model_v2 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                Habitat ~ 1 + Comp1 + Comp2 + Comp5 + Comp6 + Comp7,
+                prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b)), 
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                control = list(adapt_delta = 0.99),
+                seed = 475,
+                file = "models/pc_model_v2")
+
+
+pc_model_v2
+```
+Looks great overall in terms of convergence; and there are strong slopes that the model is identifying.
+
+Posterior:
+```{r}
+pp_check(pc_model_v2, ndraws = 100)
+```
+
+Definitely can't call that overfit. 
+
+Model parameters:
+```{r}
+set.seed(4874)
+pc_model_v2_post <- as_draws_df(pc_model_v2)
+```
+
+Intercepts:
+
+```{r, warning=F, message=F, echo=F}
+pc_model_v2_post %>% 
+  dplyr::select(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  pivot_longer(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = inv_logit_scaled(value), y = name), color = "#300948")+
+  ylab(NULL) +
+  xlab("group level intercepts (probability scale)") +
+  theme_classic(base_size = 16)
+```
+
+PC slopes:
+
+```{r, warning=F, message=F, echo=F}
+pc_model_v2_post %>% 
+  dplyr::select(b_Comp1:b_Comp7) %>%
+  pivot_longer(b_Comp1:b_Comp7) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  theme_classic(base_size = 16)
+```
+
+These effects actually look more certain when the model is run this way. Cool
+
+Posterior predictions!
+```{r}
+set.seed(4874)
+pc_model_v2_predict <- predict(pc_model_v2, ndraws = 1000, scale = "Habitat")
+pc_model_v2_predict <- bind_cols(pc_model_v2_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+pc_model_v2_predict$Predicted_Habitat <- apply(pc_model_v2_predict[,1:4], MARGIN = 1, FUN = which.max)
+pc_model_v2_predict$Predicted_Habitat <- factor(pc_model_v2_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(pc_model_v2_predict$Habitat))
+```
+
+Overall distribution of predicted habitats compared to actual distribution of habitats:
+```{r, message=F, warning=F, echo=F}
+predicted_hab_histo_pc_v2 <- ggplot(data = pc_model_v2_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions (v2)")+
+  theme_classic()
+
+(hab_histo | predicted_hab_histo_pc_v2) +
+  plot_layout(axes = "collect")
+```
+
+```{r}
+pc_model_v2_pred_table <- table(pc_model_v2_predict$Habitat, pc_model_v2_predict$Predicted_Habitat)
+round(prop.table(pc_model_v2_pred_table, margin = 1), digits = 3)
+sum(diag(prop.table(pc_model_v2_pred_table)))
+```
+
+The performance of this model isn't very different from the CVA, except the predictions for heavy cover and forest categories are much worse. There seems to be some shrinkage going on, where the model is more likely to predict specimens into the categories that are most prominent in the dataset. But based on the difference between this model and the prior one, I think that all PCs should not be included as predictors, because they just add noise. Is there a more objective way to select which PCs should be used (e.g., broken stick), or should a model be run with everything first to then select the predictors that have a non-zero effect? Do broken stick significant PCs always correspond with PCs that are going to have predictive ability?
+
+Leave-one-out cross-validation?
+```{r}
+loo(pc_model_v2)
+```
+
+### v3: Broken stick significant PCs
+
+Next, I'll compare with a model that uses all of the significant PCs according to a broken stick (PCs 1-8).
+```{r}
+pc_model_prior_v3 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                Habitat ~ 1 + Comp1 + Comp2 + Comp3 + Comp4 + Comp5 + Comp6 + Comp7 + Comp8,
+                prior = c(prior(normal(0, 1.5), class = Intercept), # same intercept prior
+                          prior(normal(0,0.5), class = b)), # regularizing prior for slopes
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                sample_prior = "only",
+                seed = 475,
+                file = "models/pc_model_prior_v3")
+
+
+pc_model_prior_v3
+```
+
+```{r}
+pp_check(pc_model_prior_v3, ndraws = 100)
+```
+
+Looks good on the priors front. 
+
+With the real data:
+```{r}
+pc_model_v3 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                Habitat ~ 1 + Comp1 + Comp2 + Comp3 + Comp4 + Comp5 + Comp6 + Comp7 + Comp8,
+                prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b)), 
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                control = list(adapt_delta = 0.99),
+                seed = 475,
+                file = "models/pc_model_v3")
+
+
+pc_model_v3
+```
+
+Intercept coefficients:
+
+```{r, warning=F, message=F, echo=F}
+set.seed(5463)
+pc_model_v3_post <- as_draws_df(pc_model_v3)
+
+pc_model_v3_post %>% 
+  dplyr::select(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  pivot_longer(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = inv_logit_scaled(value), y = name), color = "#300948")+
+  ylab(NULL) +
+  xlab("group level intercepts (probability scale)") +
+  theme_classic(base_size = 16)
+```
+
+PC slope coefficients, compared to model v2:
+
+```{r, fig.width=8, warning=F, message=F, echo=F}
+coeffs_v2_plot <- pc_model_v2_post %>% 
+  dplyr::select(b_Comp1:b_Comp7) %>%
+  pivot_longer(b_Comp1:b_Comp7) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("PC model v2")+
+  theme_classic(base_size = 16)
+
+coeffs_v3_plot <- pc_model_v3_post %>% 
+  dplyr::select(b_Comp1:b_Comp8) %>%
+  pivot_longer(b_Comp1:b_Comp8) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("PC model v3") +
+  theme_classic(base_size = 16)
+
+coeffs_v2_plot | coeffs_v3_plot
+```
+
+Between the 2 models, the coefficients are very similar. Comp3 and Comp8 seem to have very little effect, although Comp4 might add some predictive power?
+
+Posterior predictions for v3:
+```{r}
+set.seed(5463)
+pc_model_v3_predict <- predict(pc_model_v3, ndraws = 1000, scale = "Habitat")
+pc_model_v3_predict <- bind_cols(pc_model_v3_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+pc_model_v3_predict$Predicted_Habitat <- apply(pc_model_v3_predict[,1:4], MARGIN = 1, FUN = which.max)
+pc_model_v3_predict$Predicted_Habitat <- factor(pc_model_v3_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(pc_model_v3_predict$Habitat))
+```
+
+Overall distribution of predicted habitats compared to actual distribution of habitats:
+```{r, message=F, warning=F, echo=F, fig.height=9}
+predicted_hab_histo_pc_v3 <- ggplot(data = pc_model_v3_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions", subtitle = "PCs 1-8")+
+  theme_classic(base_size = 14)
+
+(hab_histo | (predicted_hab_histo_pc_v2 / predicted_hab_histo_pc_v3) ) +
+  plot_layout(axes = "collect")
+```
+
+Visually, it looks like v3 does slightly better at predicting open and light cover, although predictions for heavy cover and forest are still not great.
+
+```{r}
+pc_model_v3_predict <- pc_model_v3_predict %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+pc_model_v3_wsum_plot <- ggplot(pc_model_v3_predict) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_brewer(palette = "BrBG", name = "maximum\nindividual\nprobability") + 
+  ylab("weighted sum of probabilities")+
+  xlab("known habitat")+
+  ylim(1,4)+
+  theme_classic(base_size = 14)+
+  ggtitle("PC model", subtitle = "PCs 1-8")
+
+pc_model_v3_wsum_plot
+```
+
+
+```{r}
+pc_model_v3_pred_table <- table(pc_model_v3_predict$Habitat, pc_model_v3_predict$Predicted_Habitat)
+round(prop.table(pc_model_v3_pred_table, margin = 1), digits = 3)
+sum(diag(prop.table(pc_model_v3_pred_table)))
+```
+Numerically, the predictions are better when PC1-8 are included.
+
+Model comparison (WAIC):
+```{r}
+pc_model_v2 <- add_criterion(pc_model_v2, c("waic", "loo"))
+pc_model_v3 <- add_criterion(pc_model_v3, c("waic", "loo"))
+
+compare_models <- loo_compare(pc_model_v2, pc_model_v3, criterion = "waic")
+loo_compare(pc_model_v2, pc_model_v3, criterion = "loo")
+
+print(compare_models, simplify = F)
+```
+Even though model v3 has a couple more parameters, it has a slightly lower WAIC. 
+
+### v4: All PCs, but not varying slopes
+
+For kicks, I'm going to run one more model with just the PCs, but using all of them, this time without the varying slopes/random effects, just to compare.
+```{r}
+all_pc_formula <- brms::bf(formula = Habitat ~ 1 + Comp1+Comp2+Comp3+Comp4+Comp5+Comp6+Comp7+Comp8+Comp9+Comp10+Comp11+Comp12+Comp13+Comp14+Comp15+Comp16+Comp17+Comp18+Comp19+Comp20+Comp21+Comp22+Comp23+Comp24+Comp25+Comp26+Comp27+Comp28+Comp29+Comp30+Comp31+Comp32+Comp33+Comp34+Comp35+Comp36+Comp37+Comp38+Comp39+Comp40+Comp41+Comp42+Comp43+Comp44+Comp45+Comp46+Comp47+Comp48+Comp49+Comp50+Comp51+Comp52+Comp53)
+
+# prior predictive check
+pc_model_prior_v4 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                formula = all_pc_formula,
+                prior = c(prior(normal(0, 1.5), class = Intercept), # same intercept prior
+                          prior(normal(0,0.5), class = b)), # regularizing prior for slopes
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                sample_prior = "only",
+                seed = 475,
+                file = "models/pc_model_prior_v4")
+
+pc_model_prior_v4
+```
+
+```{r}
+pp_check(pc_model_prior_v4, ndraws = 100)
+```
+
+That's funky and doesn't look like the prior distributions from the other model iterations, but doesn't seem unreasonable?
+
+The real data will likely overwhelm that prior anyway:
+```{r}
+pc_model_v4 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                formula = all_pc_formula,
+                prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b)), 
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                control = list(adapt_delta = 0.99),
+                seed = 2385,
+                file = "models/pc_model_v4")
+
+
+pc_model_v4
+```
+
+Posterior:
+
+```{r}
+pp_check(pc_model_v4, ndraws = 100)
+```
+
+
+V4 intercept coefficients:
+```{r, warning=F, echo=F, message=F}
+set.seed(6405)
+pc_model_v4_post <- as_draws_df(pc_model_v4)
+
+pc_model_v4_post %>% 
+  dplyr::select(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  pivot_longer(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = inv_logit_scaled(value), y = name), color = "#300948")+
+  ylab(NULL) +
+  xlab("group level intercepts (probability scale)") +
+  theme_classic(base_size = 16)
+```
+
+```{r, echo=F, warning=F, message=F, fig.height=10}
+coeffs_v4_plot <- pc_model_v4_post %>% 
+  dplyr::select(b_Comp1:b_Comp53) %>%
+  pivot_longer(b_Comp1:b_Comp53) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("PC model v4") +
+  theme_classic(base_size = 16)
+
+coeffs_v4_plot
+
+```
+
+Pretty similar results as the prior models. The same few PCs keep coming out as being the most useful predictors, and most others have coefficients that hover around zero. It seems like the width of the error bars increases when there are so many predictors, too. 
+
+Posterior predictions for v4:
+```{r}
+set.seed(6405)
+pc_model_v4_predict <- predict(pc_model_v4, ndraws = 1000, scale = "Habitat")
+pc_model_v4_predict <- bind_cols(pc_model_v4_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+pc_model_v4_predict$Predicted_Habitat <- apply(pc_model_v4_predict[,1:4], MARGIN = 1, FUN = which.max)
+pc_model_v4_predict$Predicted_Habitat <- factor(pc_model_v4_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(pc_model_v4_predict$Habitat))
+```
+
+Overall distribution of predicted habitats compared to actual distribution of habitats:
+```{r, message=F, warning=F, echo=F, fig.height=10}
+predicted_hab_histo_pc_v4 <- ggplot(data = pc_model_v4_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions", subtitle = "PCs 1-53")+
+  theme_classic(base_size = 14)
+
+(hab_histo | (predicted_hab_histo_pc_v2 / predicted_hab_histo_pc_v3 / predicted_hab_histo_pc_v4) ) +
+  plot_layout(axes = "collect")
+```
+
+The predictions are better here...
+
+```{r}
+pc_model_v4_predict <- pc_model_v4_predict %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+pc_model_v4_wsum_plot <- ggplot(pc_model_v4_predict) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_brewer(palette = "BrBG", name = "maximum\nindividual\nprobability") + 
+  ylab("weighted sum of probabilities")+
+  xlab("known habitat")+
+  ylim(1,4)+
+  theme_classic(base_size = 14)+
+  ggtitle("PC model", subtitle = "PCs 1-53")
+
+pc_model_v4_wsum_plot
+```
+
+```{r}
+pc_model_v4_pred_table <- table(pc_model_v4_predict$Habitat, pc_model_v4_predict$Predicted_Habitat)
+round(prop.table(pc_model_v4_pred_table, margin = 1), digits = 3)
+sum(diag(prop.table(pc_model_v4_pred_table)))
+```
+This also out-performs the CVA that uses all PCs (although this is not LOO cross-validated). The model seems to have the most trouble with the heavy cover category. But this also suggests to me that there are some higher PCs that are useful for identifying "Forest" bovids.
+
+WAIC model comparison:
+```{r}
+pc_model_v4 <- add_criterion(pc_model_v4, "waic")
+
+compare_models <- loo_compare(pc_model_v2, pc_model_v3, pc_model_v4, criterion = "waic")
+
+print(compare_models, simplify = F)
+```
+Model v3 still seems to be the most robust, at least in terms of WAIC.
+
+### v5: 95% of variance PCs (1-30)
+
+One last model for the sake of comparison with the LDAs. This time, I'll use the first 30 PCs, which represent 95% of the sample variance. 
+
+```{r}
+pc30_formula <- brms::bf(formula = Habitat ~ 1 + Comp1+Comp2+Comp3+Comp4+Comp5+Comp6+Comp7+Comp8+Comp9+Comp10+Comp11+Comp12+Comp13+Comp14+Comp15+Comp16+Comp17+Comp18+Comp19+Comp20+Comp21+Comp22+Comp23+Comp24+Comp25+Comp26+Comp27+Comp28+Comp29+Comp30)
+
+# prior predictive check
+pc_model_prior_v5 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                formula = pc30_formula,
+                prior = c(prior(normal(0, 1.5), class = Intercept), # same intercept prior
+                          prior(normal(0,0.5), class = b)), # regularizing prior for slopes
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                sample_prior = "only",
+                seed = 1021,
+                file = "models/pc_model_prior_v5")
+
+pc_model_prior_v5
+```
+
+Prior predictive check:
+
+```{r}
+pp_check(pc_model_prior_v5, ndraws = 100)
+```
+
+On the real data:
+```{r}
+pc_model_v5 <- brm(data = astragali_pc_scaled,
+                family = cumulative,
+                formula = pc30_formula,
+                prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b)), 
+                iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                control = list(adapt_delta = 0.99),
+                seed = 1021,
+                file = "models/pc_model_v5")
+
+
+pc_model_v5
+```
+
+Posterior:
+
+```{r}
+pp_check(pc_model_v5, ndraws = 100)
+```
+
+v5 coefficients:
+
+```{r, warning=F, message=F, echo=F}
+set.seed(2181)
+pc_model_v5_post <- as_draws_df(pc_model_v5)
+
+pc_model_v5_post %>% 
+  dplyr::select(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  pivot_longer(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = inv_logit_scaled(value), y = name), color = "#300948")+
+  ylab(NULL) +
+  xlab("group level intercepts (probability scale)") +
+  theme_classic(base_size = 16)
+```
+
+```{r, fig.height=10, warning=F, message=F, echo=F}
+coeffs_v5_plot <- pc_model_v5_post %>% 
+  dplyr::select(b_Comp1:b_Comp30) %>%
+  pivot_longer(b_Comp1:b_Comp30) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("PC model v5") +
+  theme_classic(base_size = 16)
+
+coeffs_v5_plot
+```
+
+Similar results here. PC21 seems to have a small effect?
+
+Predictions:
+```{r}
+set.seed(2181)
+pc_model_v5_predict <- predict(pc_model_v5, ndraws = 1000, scale = "Habitat")
+pc_model_v5_predict <- bind_cols(pc_model_v5_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+pc_model_v5_predict$Predicted_Habitat <- apply(pc_model_v5_predict[,1:4], MARGIN = 1, FUN = which.max)
+pc_model_v5_predict$Predicted_Habitat <- factor(pc_model_v5_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(pc_model_v5_predict$Habitat))
+```
+
+```{r, fig.width=9, echo=F, warning=F, message=F}
+predicted_hab_histo_pc_v5 <- ggplot(data = pc_model_v5_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions", subtitle = "PCs 1-30")+
+  theme_classic(base_size = 14)
+
+(hab_histo | (predicted_hab_histo_pc_v2 / predicted_hab_histo_pc_v3) | (predicted_hab_histo_pc_v4 / predicted_hab_histo_pc_v5)) +
+  plot_layout(axes = "collect")
+
+(predicted_hab_histo_pc_v3 | predicted_hab_histo_pc_v4 | predicted_hab_histo_pc_v5 | hab_histo) + plot_layout(nrow = 2, guides = "collect")
+```
+
+These predictions look good, too. In v5, mis-classifications are only in adjacent categories, which can't be said for any of the other model iterations.
+
+Can we assess predictions another way? What about a weighted sum of the probabilities:
+
+```{r, fig.height=8, fig.width=8}
+pc_model_v5_predict <- pc_model_v5_predict %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+pc_model_v5_wsum_plot <- ggplot(pc_model_v5_predict) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_brewer(palette = "BrBG", name = "maximum\nindividual\nprobability") + 
+  ylab("weighted sum of probabilities")+
+  xlab("known habitat")+
+  ylim(1,4)+
+  theme_classic(base_size = 14)+
+  ggtitle("PC model", subtitle = "PCs 1-30")
+
+pc_model_v5_wsum_plot
+```
+
+```{r, fig.height=6, fig.width=14}
+(pc_model_v3_wsum_plot | pc_model_v4_wsum_plot | pc_model_v5_wsum_plot ) + plot_layout(guides = "collect", axis_titles = "collect")
+ggsave("figures/PC_models_weighted_sums.png", height = 6, width = 14)
+```
+
+
+```{r}
+pc_model_v5_pred_table <- table(pc_model_v5_predict$Habitat, pc_model_v5_predict$Predicted_Habitat)
+round(prop.table(pc_model_v5_pred_table, margin = 1), digits = 3)
+sum(diag(prop.table(pc_model_v5_pred_table)))
+```
+Pretty comparable to v4, although accuracy for forest bovids is lower.
+
+WAIC comparison:
+```{r}
+pc_model_v5 <- add_criterion(pc_model_v5, "waic")
+
+compare_models <- loo_compare(pc_model_v2, pc_model_v3, pc_model_v4, pc_model_v5, criterion = "waic")
+
+print(compare_models, simplify = F)
+```
+V5 has the lowest WAIC!
+
+Based on these results, it seems like either using a model with the first 30 PCs which capture 95% of the sample variance, or just using the first 8 PCs that are significant according to a broken stick model, are both pretty solid ways to predict. Both seem to perform comparably with CVA, although predictive accuracy appears somewhat worse for heavy cover and forest categories. 
+
+### Summary plot of non-phylogenetic models
+```{r, fig.height=10, fig.width=14}
+((predicted_hab_histo_pc_v3 | predicted_hab_histo_pc_v4 | predicted_hab_histo_pc_v5) + plot_layout(guides = "collect", axis_titles = "collect")) / ((pc_model_v3_wsum_plot | pc_model_v4_wsum_plot | pc_model_v5_wsum_plot ) + plot_layout(guides = "collect", axis_titles = "collect"))
+ggsave("figures/non_phylo_models_posterior_summary.png", width = 14, height = 10)
+```
+
+
+### v6: Add phylogeny (Brownian motion version)
+
+The tree:
+```{r, fig.height=8, fig.width=8}
+plot(zurano_phy)
+```
+
+Generate phylogenetic covariance matrix and distance matrix for the 36 species included in the dataset:
+```{r}
+bov_cov <- vcv(corBrownian(phy = zurano_phy, form = ~ zurano_phy$tip.label)) # covariance matrix
+bov_dmat <- cophenetic(zurano_phy) # distance matrix
+```
+
+Distance versus covariance:
+```{r, echo=F}
+full_join(bov_dmat %>% as_tibble(rownames = "row") %>%
+            pivot_longer(-row,
+                         names_to = "col",
+                         values_to = "distance"),
+          bov_cov %>% as_tibble(rownames = "row") %>%
+            pivot_longer(-row,
+                         names_to = "col",
+                         values_to = "covariance"),
+          by = c("row", "col")) %>%
+  ggplot(aes(x = distance, y = covariance)) +
+  geom_point(color = "#80A0D6") +
+  labs(x = "phylogenetic distance") +
+  theme_classic()
+```
+
+```{r}
+image(bov_cov)
+image(bov_dmat)
+```
+
+I'll try adding the phylogenetic covariance matrix to mode v5, as part of the ${\phi}$ parameter. I think what this is doing is adding a species-specific varying intercept to the ${\phi}$ linear model, such that:
+$$ {\phi} = {\gamma}_{SPECIES} + {\beta}_{PC_1}*PC_1 + ... + {\beta}_{PC_{30}}*PC_{30} $$
+The way that I had to incorporate the covariance matrix is different from how it is done (with an fcor() term) in the brms translation of Statistical Rethinking, as I got an error that "FCOR terms are not implemented for this family". Maybe I need to code this using `rethinking` instead? Since this dictates the correlation/covariance structure of the response variable directly?
+
+But in another vignette from the brms authors (https://cran.r-project.org/web/packages/brms/vignettes/brms_phylogenetics.html), they estimate varying intercepts with the syntax `(1 | gr(Genus_species, cov = R))`, where `Genus_species` is the name of the variable dictating taxonomy, and `cov = R` indicates that the covariance matrix is matrix R, which is given in the `data2` argument of the `brm()` function. *I don't know if this makes sense from a theoretical point of view? *
+
+```{r}
+R <- bov_cov / max(bov_cov) # scaled covariance matrix?
+
+pc30_phylo_formula <- bf(formula = Habitat ~ 1 + (1 | gr(Genus_species, cov = R)) +  Comp1+Comp2+Comp3+Comp4+Comp5+Comp6+Comp7+Comp8+Comp9+Comp10+Comp11+Comp12+Comp13+Comp14+Comp15+Comp16+Comp17+Comp18+Comp19+Comp20+Comp21+Comp22+Comp23+Comp24+Comp25+Comp26+Comp27+Comp28+Comp29+Comp30 ) 
+get_prior(data = astragali_pc_scaled,data2 = list(R = R),family = cumulative, formula = pc30_phylo_formula)
+
+# prior predictive check
+phylo_model_prior_v1 <- brm(data = astragali_pc_scaled,
+                      data2 = list(R = R),
+                      family = cumulative,
+                      formula = pc30_phylo_formula,
+                      prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b),
+                          prior(gamma(2,10), class = sd)),
+                      iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                      sample_prior = "only",
+                      seed = 9835,
+                      file = "models/phylo_model_prior_v1")
+
+phylo_model_prior_v1
+```
+
+Prior predictive check:
+```{r}
+pp_check(phylo_model_prior_v1, ndraws = 100)
+```
+
+Now on the real data:
+```{r}
+phylo_model_v1 <- brm(data = astragali_pc_scaled,
+                      data2 = list(R = R),
+                      family = cumulative,
+                      formula = pc30_phylo_formula,
+                      prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b),
+                          prior(gamma(2,10), class = sd)),
+                      iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                      control = list(adapt_delta = 0.99),
+                      seed = 5825,
+                      file = "models/phylo_model_v1")
+
+phylo_model_v1
+```
+Estimating Pagel's Lambda (equation is for calculating intra-class correlation (ICC) in an ordinal model; find literature where this comes from):
+```{r}
+hyp <- "sd_Genus_species__Intercept^2 / (sd_Genus_species__Intercept^2 + 3.289868) = 0"
+
+hypothesis(phylo_model_v1, hyp, class = NULL)
+```
+
+Posterior:
+```{r}
+pp_check(phylo_model_v1, ndraws = 100)
+```
+
+Examining posterior parameters more closely:
+```{r}
+set.seed(4956)
+phylo_model_v1_post <- as_draws_df(phylo_model_v1)
+```
+
+Fixed intercepts:
+```{r}
+phylo_model_v1_post %>% 
+  dplyr::select(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  pivot_longer(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = inv_logit_scaled(value), y = name), color = "#300948")+
+  ylab(NULL) +
+  xlab("group level intercepts (probability scale)") +
+  theme_classic(base_size = 16)
+```
+
+There's way more uncertainty around the intercept for the light cover category now.
+
+PC slope parameters:
+
+```{r, fig.height=10, warning=F, message=F, echo=F}
+coeffs_phylo_v1_plot <- phylo_model_v1_post %>% 
+  dplyr::select(b_Comp1:b_Comp30) %>%
+  pivot_longer(b_Comp1:b_Comp30) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("Phylo model v1") +
+  theme_classic(base_size = 16)
+
+coeffs_phylo_v1_plot
+```
+
+These coefficients are also a bit different. The range of each coefficient is wide, and now only PC 1, 6, 7, and 5 really look to have a significant effect. 
+
+Posterior predictions:
+```{r}
+set.seed(4956)
+phylo_model_v1_predict <- predict(phylo_model_v1, ndraws = 1000, scale = "Habitat")
+phylo_model_v1_predict <- bind_cols(phylo_model_v1_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+phylo_model_v1_predict$Predicted_Habitat <- apply(phylo_model_v1_predict[,1:4], MARGIN = 1, FUN = which.max)
+phylo_model_v1_predict$Predicted_Habitat <- factor(phylo_model_v1_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(phylo_model_v1_predict$Habitat))
+```
+
+```{r, fig.width=9, echo=F, warning=F, message=F}
+predicted_hab_histo_phylo_v1 <- ggplot(data = phylo_model_v1_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions\n(phylo v1)")+
+  theme_classic(base_size = 14)
+
+(hab_histo | (predicted_hab_histo_pc_v5 / predicted_hab_histo_phylo_v1)) +
+  plot_layout(axes = "collect")
+```
+
+```{r, fig.height=8, fig.width=8}
+phylo_model_v1_predict <- phylo_model_v1_predict %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+phylo_model_v1_wsum_plot <- ggplot(phylo_model_v1_predict) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_brewer(palette = "BrBG", name = "maximum\nindividual\nprobability") + 
+  ylab("weighted sum of probabilities")+
+  xlab("known habitat")+
+  theme_classic(base_size = 14)+
+  ggtitle("Phylo model (v1)", subtitle = "+ phylogenetic effect")
+
+phylo_model_v1_wsum_plot
+```
+
+These predictions are very good, but I think that's because the species term is doing a LOT of the work. If species is unknown, I'm not sure that the predictions would be very useful.
+
+```{r}
+phylo_model_v1_pred_table <- table(phylo_model_v1_predict$Habitat, phylo_model_v1_predict$Predicted_Habitat)
+round(prop.table(phylo_model_v1_pred_table, margin = 1), digits = 3)
+sum(diag(prop.table(phylo_model_v1_pred_table)))
+```
+
+Species-level coefficients:
+
+```{r, fig.height=10, warning=F, message=F, echo=F}
+species_coeffs_v1 <- phylo_model_v1_post %>% 
+  dplyr::select(starts_with("r_")) %>%
+  pivot_longer(starts_with("r_")) %>%
+  mutate(name = substr(name, 17, nchar(name)-11))%>%
+  mutate(name = fct_reorder(name, desc(value)))
+species_coeffs_v1 <- left_join(species_coeffs_v1, unique(astragali_pc_scaled[,c("Habitat", "Genus_species")]), by = c("name" = "Genus_species")) %>% distinct()
+species_coeffs_v1 <- species_coeffs_v1 %>% mutate(name = fct_reorder(name, desc(value)))
+
+species_coeffs_v1_plot <- 
+  ggplot(data = species_coeffs_v1) +
+  stat_pointinterval(aes(x = value, y = name, color = Habitat))+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  scale_color_brewer(palette = "BrBG")+
+  ylab(NULL) +
+  xlab("species-level varying intercepts (log-odds)") +
+  ggtitle("Phylo model v1") +
+  theme_classic(base_size = 16)
+
+species_coeffs_v1_plot
+```
+
+As expected, most of these coefficient values are HUGE, and they have pretty wide ranges. This tells me that if the species is unknown, a good chunk of the predictive power will be missing, and things will generally tend to be predicted as open/light cover, since that's where a greater density of the data lie. 
+
+### v7: revise the phylogenetic parameters
+
+See: https://cran.r-project.org/web/packages/brms/vignettes/brms_phylogenetics.html#a-phylogenetic-model-with-repeated-measurements
+
+Essentially, phylogeny needs to be included in 2 terms, since we have multiple observations of each species. First, we need a term to just group things by species, and then another term that accounts for the phylogeny. To do this we just duplicate the Genus_species column, and include the phylogenetic covariance matrix with that duplicated column.
+
+New formula:
+```{r}
+# duplicate the Genus_species column
+astragali_pc_scaled$Genus_species_phylo <- astragali_pc_scaled$Genus_species
+
+pc30_phylo_formula_v2 <- brms::bf(formula = Habitat ~ 1 + (1 | Genus_species) + (1 | gr(Genus_species_phylo, cov = R)) +  Comp1+Comp2+Comp3+Comp4+Comp5+Comp6+Comp7+Comp8+Comp9+Comp10+Comp11+Comp12+Comp13+Comp14+Comp15+Comp16+Comp17+Comp18+Comp19+Comp20+Comp21+Comp22+Comp23+Comp24+Comp25+Comp26+Comp27+Comp28+Comp29+Comp30 ) 
+
+get_prior(pc30_phylo_formula_v2, data = astragali_pc_scaled, data2 = list(R = R), family = cumulative)
+```
+
+On the data: 
+```{r}
+phylo_model_v2 <- brm(data = astragali_pc_scaled,
+                      data2 = list(R = R),
+                      family = cumulative,
+                      formula = pc30_phylo_formula_v2,
+                      prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b),
+                          prior(gamma(2,10), class = sd)),
+                      iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                      control = list(adapt_delta = 0.99),
+                      seed = 5825,
+                      file = "models/phylo_model_v2")
+
+phylo_model_v2
+```
+Posterior check:
+
+```{r}
+pp_check(phylo_model_v2, ndraws = 100)
+```
+Posterior looks nice!
+
+Estimating Pagel's Lambda: 
+```{r}
+hyp_v2 <- "sd_Genus_species_phylo__Intercept^2 / (sd_Genus_species_phylo__Intercept^2 + 3.289868) = 0"
+
+hypothesis(phylo_model_v2, hyp_v2, class = NULL)
+```
+
+Examining the posterior parameters:
+
+```{r, fig.height=10}
+set.seed(6546)
+phylo_model_v2_post <- as_draws_df(phylo_model_v2)
+
+coeffs_phylo_v2_plot <- phylo_model_v2_post %>% 
+  dplyr::select(b_Comp1:b_Comp30) %>%
+  pivot_longer(b_Comp1:b_Comp30) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("Phylo model v2") +
+  theme_classic(base_size = 16)
+
+coeffs_phylo_v2_plot
+```
+
+These intervals are very wide, and again the only PCs that seem to have any effect are 6, 1, 5 and 7. But maybe this suggests also that even after accounting for phylogeny, these few PCs still have some predictive ability when it comes to habitat.
+
+Now looking at just the Genus_species coefficients (the simple grouping variables): 
+
+```{r, fig.height=10, warning=F, message=F, echo=F}
+species_coeffs_v2 <- phylo_model_v2_post %>% 
+  dplyr::select(40:75) %>%
+  pivot_longer(starts_with("r_")) %>%
+  mutate(name = substr(name, 17, nchar(name)-11))%>%
+  mutate(name = fct_reorder(name, desc(value)))
+species_coeffs_v2 <- left_join(species_coeffs_v2, unique(astragali_pc_scaled[,c("Habitat", "Genus_species")]), by = c("name" = "Genus_species")) %>% distinct()
+species_coeffs_v2 <- species_coeffs_v2 %>% mutate(name = fct_reorder(name, desc(value)))
+
+species_coeffs_v2_plot <- 
+  ggplot(data = species_coeffs_v2) +
+  stat_pointinterval(aes(x = value, y = name, color = Habitat))+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  scale_color_brewer(palette = "BrBG")+
+  ylab(NULL) +
+  xlab("species-level varying intercepts (log-odds)") +
+  ggtitle("Phylo model v2") +
+  theme_classic(base_size = 16)
+
+species_coeffs_v2_plot
+```
+
+These are all pretty uninformative.
+
+Phylo coefficients:
+
+```{r, fig.height=10, warning=F, message=F, echo=F}
+phylo_species_coeffs_v2 <- phylo_model_v2_post %>% 
+  dplyr::select(76:111) %>%
+  pivot_longer(starts_with("r_")) %>%
+  mutate(name = substr(name, 23, nchar(name)-11))%>%
+  mutate(name = fct_reorder(name, desc(value)))
+phylo_species_coeffs_v2 <- left_join(phylo_species_coeffs_v2, unique(astragali_pc_scaled[,c("Habitat", "Genus_species")]), by = c("name" = "Genus_species")) %>% distinct()
+phylo_species_coeffs_v2 <- phylo_species_coeffs_v2 %>% mutate(name = fct_reorder(name, desc(value)))
+
+phylo_species_coeffs_v2_plot <- 
+  ggplot(data = phylo_species_coeffs_v2) +
+  stat_pointinterval(aes(x = value, y = name, color = Habitat))+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  scale_color_brewer(palette = "BrBG")+
+  ylab(NULL) +
+  xlab("species-level phylogenetic varying intercepts (log-odds)") +
+  ggtitle("Phylo model v2") +
+  theme_classic(base_size = 16)
+
+phylo_species_coeffs_v2_plot
+```
+
+This is very similar to what the first phylogenetic model output. The majority of the predictive power is in the phylogenetic parameters. So if you know the species, you can probably predict the habitat pretty well, even in the absence of morphology. But that's what we know about bovids anyway. It's interesting, though, that the coefficients for the heavy cover and forest species are not as informative as the open and light cover ones?
+
+Model posterior predictions:
+
+```{r}
+set.seed(6546)
+phylo_model_v2_predict <- predict(phylo_model_v2, ndraws = 1000, scale = "Habitat")
+phylo_model_v2_predict <- bind_cols(phylo_model_v2_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+phylo_model_v2_predict$Predicted_Habitat <- apply(phylo_model_v2_predict[,1:4], MARGIN = 1, FUN = which.max)
+phylo_model_v2_predict$Predicted_Habitat <- factor(phylo_model_v2_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(phylo_model_v2_predict$Habitat))
+```
+
+```{r, fig.height=8, fig.width=8}
+phylo_model_v2_predict <- phylo_model_v2_predict %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+phylo_model_v2_wsum_plot <- ggplot(phylo_model_v2_predict) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_brewer(palette = "BrBG", name = "maximum\nindividual\nprobability") + 
+  ylab("weighted sum of probabilities")+
+  xlab("known habitat")+
+  theme_classic(base_size = 14)+
+  ggtitle("Phylo model (v2)", subtitle = "species effect\n+ phylogenetic effect")
+
+phylo_model_v2_wsum_plot
+```
+
+Predictions while IGNORING species and phylogenetic effects:
+```{r}
+set.seed(6546)
+phylo_model_v2_predict_nl <- predict(phylo_model_v2, ndraws = 1000, scale = "Habitat", allow_new_levels = T, sample_new_levels = "gaussian", re_formula = ~1)
+phylo_model_v2_predict_nl <- bind_cols(phylo_model_v2_predict_nl, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+phylo_model_v2_predict_nl$Predicted_Habitat <- apply(phylo_model_v2_predict_nl[,1:4], MARGIN = 1, FUN = which.max)
+phylo_model_v2_predict_nl$Predicted_Habitat <- factor(phylo_model_v2_predict_nl$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(phylo_model_v2_predict_nl$Habitat))
+```
+
+```{r, fig.height=8, fig.width=8}
+phylo_model_v2_predict_nl <- phylo_model_v2_predict_nl %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+phylo_model_v2_nl_wsum_plot <- ggplot(phylo_model_v2_predict_nl) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_manual(values = c("O" = "#a6611a", "LC" = "#dfc27d", "HC" = "#80cdc1", "F" = "#018571"), name = "maximum\nindividual\nprobability") +
+  ylab("weighted sum of probabilities")+
+  ylim(1,4)+
+  xlab("known habitat")+
+  theme_classic(base_size = 14)
+
+phylo_model_v2_nl_wsum_plot
+```
+
+```{r, fig.width=14, echo=F, warning=F, message=F}
+predicted_hab_histo_phylo_v2 <- ggplot(data = phylo_model_v2_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions", subtitle = "PCs 1-30 + phylogeny")+
+  theme_classic(base_size = 14)
+
+predicted_hab_histo_phylo_v2_nl <- ggplot(data = phylo_model_v2_predict_nl)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_manual(values = c("O" = "#a6611a", "LC" = "#dfc27d", "HC" = "#80cdc1", "F" = "#018571"), name = "Predicted\nHabitat") +
+  ggtitle("Posterior predictions", subtitle = "PCs 1-30 + phylogeny, without species coefficients")+
+  theme_classic(base_size = 14)
+
+predicted_hab_histo_phylo_v2 + predicted_hab_histo_phylo_v2_nl + plot_layout(guides = "collect")
+```
+
+These predictions are essentially perfect again, but only when species/phylogenetic terms are used in predictions.
+
+### v8: species effect without phylogenetic covariance matrix
+
+This is to compare with the model that has just one species effect but includes the covariance matrix.
+
+```{r}
+pc30_phylo_formula_v3 <- brms::bf(formula = Habitat ~ 1 + (1 | Genus_species)+  Comp1+Comp2+Comp3+Comp4+Comp5+Comp6+Comp7+Comp8+Comp9+Comp10+Comp11+Comp12+Comp13+Comp14+Comp15+Comp16+Comp17+Comp18+Comp19+Comp20+Comp21+Comp22+Comp23+Comp24+Comp25+Comp26+Comp27+Comp28+Comp29+Comp30 )
+```
+
+Model on the data:
+
+```{r}
+phylo_model_v3 <- brm(data = astragali_pc_scaled,
+                      family = cumulative,
+                      formula = pc30_phylo_formula_v3,
+                      prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b),
+                          prior(gamma(2,10), class = sd)),
+                      iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                      control = list(adapt_delta = 0.99),
+                      seed = 7249,
+                      file = "models/phylo_model_v3")
+
+phylo_model_v3
+```
+
+```{r}
+pp_check(phylo_model_v3, ndraws = 100)
+```
+
+Posterior parameters:
+
+```{r}
+set.seed(9631)
+phylo_model_v3_post <- as_draws_df(phylo_model_v3)
+```
+
+Intercepts: 
+
+```{r}
+phylo_model_v3_post %>% 
+  dplyr::select(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  pivot_longer(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("Phylo model v3") +
+  theme_classic(base_size = 16)
+```
+
+PC coefficients: 
+
+```{r}
+coeffs_phylo_v3_plot <- phylo_model_v3_post %>% 
+  dplyr::select(b_Comp1:b_Comp30) %>%
+  pivot_longer(b_Comp1:b_Comp30) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("Phylo model v3") +
+  theme_classic(base_size = 16)
+
+coeffs_phylo_v3_plot
+```
+
+Species effects:
+
+```{r}
+species_coeffs_v3 <- phylo_model_v3_post %>% 
+  dplyr::select(starts_with("r_")) %>%
+  pivot_longer(starts_with("r_")) %>%
+  mutate(name = substr(name, 17, nchar(name)-11))%>%
+  mutate(name = fct_reorder(name, desc(value)))
+species_coeffs_v3 <- left_join(species_coeffs_v3, unique(astragali_pc_scaled[,c("Habitat", "Genus_species")]), by = c("name" = "Genus_species")) %>% distinct()
+species_coeffs_v3 <- species_coeffs_v3 %>% mutate(name = fct_reorder(name, desc(value)))
+
+species_coeffs_v3_plot <- 
+  ggplot(data = species_coeffs_v3) +
+  stat_pointinterval(aes(x = value, y = name, color = Habitat))+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  scale_color_brewer(palette = "BrBG")+
+  ylab(NULL) +
+  xlab("species-level varying intercepts (log-odds)") +
+  ggtitle("Phylo model v3") +
+  theme_classic(base_size = 16)
+
+species_coeffs_v3_plot
+```
+
+Model posterior predictions:
+
+```{r}
+set.seed(9631)
+phylo_model_v3_predict <- predict(phylo_model_v3, ndraws = 1000, scale = "Habitat")
+phylo_model_v3_predict <- bind_cols(phylo_model_v3_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+phylo_model_v3_predict$Predicted_Habitat <- apply(phylo_model_v3_predict[,1:4], MARGIN = 1, FUN = which.max)
+phylo_model_v3_predict$Predicted_Habitat <- factor(phylo_model_v3_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(phylo_model_v3_predict$Habitat))
+```
+
+```{r, fig.width=9, echo=F, warning=F, message=F}
+predicted_hab_histo_phylo_v3 <- ggplot(data = phylo_model_v3_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions\n(phylo v3)")+
+  theme_classic(base_size = 14)
+
+predicted_hab_histo_phylo_v3
+```
+
+Without accounting for phylogenetic covariance and including a species term, the predictions are almost 100% accurate. Bad!
+
+```{r, fig.height=8, fig.width=8}
+phylo_model_v3_predict <- phylo_model_v3_predict %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+phylo_model_v3_wsum_plot <- ggplot(phylo_model_v3_predict) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_brewer(palette = "BrBG", name = "maximum\nindividual\nprobability") + 
+  ylab("weighted sum of probabilities")+
+  xlab("known habitat")+
+  theme_classic(base_size = 14)+
+  ggtitle("Phylo model (v3)", subtitle = "species effect\n(no phylogenetic covariance matrix)")
+  
+phylo_model_v3_wsum_plot
+```
+
+## v9: changing the priors
+```{r}
+# chatGPT says that the sd prior is way too high
+
+phylo_model_v4 <- brm(data = astragali_pc_scaled,
+                      data2 = list(R = R),
+                      family = cumulative,
+                      formula = pc30_phylo_formula_v2,
+                      prior = c(prior(normal(0, 1.5), class = Intercept), 
+                          prior(normal(0,0.5), class = b),
+                          prior(student_t(3, 0, 0.3), class = sd, group = Genus_species),
+                          prior(student_t(3, 0, 0.5), class = sd, group = Genus_species_phylo)),
+                      iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                      control = list(adapt_delta = 0.99),
+                      seed = 9138,
+                      file = "models/phylo_model_v4")
+
+phylo_model_v4
+```
+
+```{r}
+pp_check(phylo_model_v4, ndraws = 100)
+```
+
+Posterior parameters:
+
+```{r}
+set.seed(2384)
+phylo_model_v4_post <- as_draws_df(phylo_model_v4)
+```
+
+Intercepts: 
+
+```{r}
+phylo_model_v4_post %>% 
+  dplyr::select(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  pivot_longer(`b_Intercept[1]`:`b_Intercept[3]`) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("Phylo model v4") +
+  theme_classic(base_size = 16)
+```
+
+PC coefficients: 
+
+```{r}
+coeffs_phylo_v4_plot <- phylo_model_v4_post %>% 
+  dplyr::select(b_Comp1:b_Comp30) %>%
+  pivot_longer(b_Comp1:b_Comp30) %>%
+  mutate(name = fct_reorder(name, desc(value))) %>%
+  ggplot() +
+  stat_pointinterval(aes(x = value, y = name), color = "#300948")+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  ylab(NULL) +
+  xlab("PC effects (log-odds)") +
+  ggtitle("Phylo model v4") +
+  theme_classic(base_size = 16)
+
+coeffs_phylo_v4_plot
+```
+
+```{r, fig.height=10, warning=F, message=F, echo=F}
+species_coeffs_v4 <- phylo_model_v4_post %>% 
+  dplyr::select(40:75) %>%
+  pivot_longer(starts_with("r_")) %>%
+  mutate(name = substr(name, 17, nchar(name)-11))%>%
+  mutate(name = fct_reorder(name, desc(value)))
+species_coeffs_v4 <- left_join(species_coeffs_v4, unique(astragali_pc_scaled[,c("Habitat", "Genus_species")]), by = c("name" = "Genus_species")) %>% distinct()
+species_coeffs_v4 <- species_coeffs_v2 %>% mutate(name = fct_reorder(name, desc(value)))
+
+species_coeffs_v4_plot <- 
+  ggplot(data = species_coeffs_v4) +
+  stat_pointinterval(aes(x = value, y = name, color = Habitat))+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  scale_color_brewer(palette = "BrBG")+
+  ylab(NULL) +
+  xlab("species-level varying intercepts (log-odds)") +
+  ggtitle("Phylo model v4") +
+  theme_classic(base_size = 16)
+
+species_coeffs_v4_plot
+```
+
+Phylo coefficients:
+
+```{r, fig.height=10, warning=F, message=F, echo=F}
+phylo_species_coeffs_v4 <- phylo_model_v4_post %>% 
+  dplyr::select(76:111) %>%
+  pivot_longer(starts_with("r_")) %>%
+  mutate(name = substr(name, 23, nchar(name)-11))%>%
+  mutate(name = fct_reorder(name, desc(value)))
+phylo_species_coeffs_v4 <- left_join(phylo_species_coeffs_v4, unique(astragali_pc_scaled[,c("Habitat", "Genus_species")]), by = c("name" = "Genus_species")) %>% distinct()
+phylo_species_coeffs_v4 <- phylo_species_coeffs_v4 %>% mutate(name = fct_reorder(name, desc(value)))
+
+phylo_species_coeffs_v4_plot <- 
+  ggplot(data = phylo_species_coeffs_v4) +
+  stat_pointinterval(aes(x = value, y = name, color = Habitat))+
+  geom_vline(xintercept = 0, color = alpha("gray20", alpha = 0.5)) +
+  scale_color_brewer(palette = "BrBG")+
+  ylab(NULL) +
+  xlab("species-level phylogenetic varying intercepts (log-odds)") +
+  ggtitle("Phylo model v4") +
+  theme_classic(base_size = 16)
+
+phylo_species_coeffs_v4_plot
+```
+
+These coefficients are even crazier than before. Predictions without them are going to be garbage!
+
+Model posterior predictions:
+
+```{r}
+set.seed(2484)
+phylo_model_v4_predict <- predict(phylo_model_v4, ndraws = 1000, scale = "Habitat")
+phylo_model_v4_predict <- bind_cols(phylo_model_v4_predict, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+phylo_model_v4_predict$Predicted_Habitat <- apply(phylo_model_v4_predict[,1:4], MARGIN = 1, FUN = which.max)
+phylo_model_v4_predict$Predicted_Habitat <- factor(phylo_model_v4_predict$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(phylo_model_v4_predict$Habitat))
+```
+
+```{r, fig.height=8, fig.width=8}
+phylo_model_v4_predict <- phylo_model_v4_predict %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+phylo_model_v4_wsum_plot <- ggplot(phylo_model_v4_predict) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_brewer(palette = "BrBG", name = "maximum\nindividual\nprobability") + 
+  ylab("weighted sum of probabilities")+
+  xlab("known habitat")+
+  theme_classic(base_size = 14)+
+  ggtitle("Phylo model (v4)", subtitle = "species effect + phylogenetic\neffect, new priors")
+
+phylo_model_v4_wsum_plot
+```
+
+Predictions while IGNORING species and phylogenetic effects:
+```{r}
+set.seed(2373)
+phylo_model_v4_predict_nl <- predict(phylo_model_v4, ndraws = 1000, scale = "Habitat", allow_new_levels = T, sample_new_levels = "gaussian", re_formula = ~1)
+phylo_model_v4_predict_nl <- bind_cols(phylo_model_v4_predict_nl, astragali_pc_scaled[,c("Habitat", "Tribe", "Genus_species")])
+phylo_model_v4_predict_nl$Predicted_Habitat <- apply(phylo_model_v4_predict_nl[,1:4], MARGIN = 1, FUN = which.max)
+phylo_model_v4_predict_nl$Predicted_Habitat <- factor(phylo_model_v4_predict_nl$Predicted_Habitat, levels = c(1,2,3,4), labels = levels(phylo_model_v4_predict_nl$Habitat))
+```
+
+```{r, fig.height=8, fig.width=8}
+phylo_model_v4_predict_nl <- phylo_model_v2_predict_nl %>% 
+  mutate(predicted_value = `P(Y = O)`*1 + `P(Y = LC)`*2 + `P(Y = HC)`*3 + `P(Y = F)`*4)
+
+phylo_model_v4_nl_wsum_plot <- ggplot(phylo_model_v4_predict_nl) +
+  geom_point(aes(x = Habitat, y = predicted_value, color = Predicted_Habitat), size = 4)+
+  scale_color_manual(values = c("O" = "#a6611a", "LC" = "#dfc27d", "HC" = "#80cdc1", "F" = "#018571"), name = "maximum\nindividual\nprobability") +
+  ylab("weighted sum of probabilities")+
+  ylim(1,4)+
+  xlab("known habitat")+
+  theme_classic(base_size = 14)
+
+phylo_model_v4_nl_wsum_plot
+```
+
+```{r, fig.width=14, echo=F, warning=F, message=F}
+predicted_hab_histo_phylo_v4 <- ggplot(data = phylo_model_v4_predict)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_brewer(palette = "BrBG", name = "Predicted\nHabitat")+
+  ggtitle("Posterior predictions", subtitle = "(phylo v4)")+
+  theme_classic(base_size = 14)
+
+predicted_hab_histo_phylo_v4_nl <- ggplot(data = phylo_model_v4_predict_nl)+
+  geom_histogram(aes(x = Habitat, fill = Predicted_Habitat), stat = "count", binwidth = 1/2)+
+  scale_fill_manual(values = c("O" = "#a6611a", "LC" = "#dfc27d", "HC" = "#80cdc1", "F" = "#018571"), name = "Predicted\nHabitat") +
+  ggtitle("Posterior predictions", subtitle = "(phylo v4, without species coefficients)")+
+  theme_classic(base_size = 14)
+
+predicted_hab_histo_phylo_v4 + predicted_hab_histo_phylo_v4_nl + plot_layout(guides = "collect")
+```
+
+## v10: measurement error model
+try: model that accounts for measurement error, without phylogenetic/species effects 
+
+re-format the dataset such that each species is one row, and is represented by a species mean for each PC, and a standard error for each PC.
+use pooled standard error for the standard error of species with n = 1
+
+```{r}
+# do this on un-scaled PCs?
+
+# calculate species mean values for each PC
+species_mean_pcs <- astragali_info %>% dplyr::select(Genus_species, starts_with("Comp")) %>% group_by(Genus_species) %>%
+  mutate_at(vars(-group_cols()), mean) %>% distinct()
+colnames(species_mean_pcs)[2:54] <- paste(colnames(species_mean_pcs[2:54]), "mean", sep = "_")
+
+# calculate sample sizes for each species
+species_samples <- astragali_info %>% group_by(Genus_species) %>% tally()
+
+# calculate standard deviations for each PC within each species
+species_sd <- astragali_info %>% dplyr::select(Genus_species, starts_with("Comp")) %>% group_by(Genus_species) %>% mutate_at(vars(-group_cols()), sd) %>% distinct()
+colnames(species_sd)[2:54] <- paste(colnames(species_sd[2:54]), "sd", sep = "_")
+
+# join dataframes
+species_summary <- full_join(species_samples, species_mean_pcs, by = "Genus_species")
+species_summary <- full_join(species_summary, species_sd, by = "Genus_species")
+
+# calculate standard error for species with >1 sample (sd/sqrt(n))
+species_summary <- species_summary %>% 
+  mutate(across(.cols = ends_with("sd"), ~ .x/sqrt(n), .names = "{.col}_se"))
+colnames(species_summary)[109:161] <- sub("sd_", "", colnames(species_summary)[109:161])
+
+# calculate pooled standard error for each PC
+
+# calculate variance for each PC by species
+species_var <- astragali_info %>% dplyr::select(Genus_species, starts_with("Comp")) %>% group_by(Genus_species) %>%
+  mutate_at(vars(-group_cols()), var) %>% distinct()
+colnames(species_var)[2:54] <- paste(colnames(species_var)[2:54], "var", sep = "_")
+species_var <- left_join(species_samples, species_var, by = "Genus_species")
+
+# filter out anything with n = 1, because they don't have variance
+species_var <- species_var %>% dplyr::filter(n > 1)
+
+# pooled variance for each PC axis
+pooled_var <- function(x, n){
+  sum((n-1)*x) / (sum(n) - length(x))
+}
+species_var <- species_var %>% mutate(across(.cols = ends_with("var"), ~ pooled_var(., n = n), .names = "{.col}_pooled_var"))
+
+# calculate pooled standard error for each PC using the pooled variances and sample sizes
+species_var <- species_var %>% mutate(across(.cols = ends_with("pooled_var"), ~ sqrt(sum(.x/n)), .names = "{.col}_pooled_se"))
+
+# select just the pooled standard error values for each PC
+pooled <- species_var %>% dplyr::select(ends_with("se")) %>% distinct()
+colnames(pooled) <- sub("var_pooled_var_", "", colnames(pooled))
+
+# insert pooled standard error values for species with n = 1 
+species_summary[species_summary$n == 1,109:161] <- pooled[1,]
+
+```
+
+Now I have values for mean and standard error for all PCs and all the species in the dataset. I'm worried that doing this on unscaled data will mess with the model convergence, but I also don't think that calculating the variance should be done on scaled variables, especially when some of those values aren't included in the pooled variance/standard error?
+
+```{r}
+# add habitat categories to species summary dataframe
+species_summary <- left_join(species_summary, astragali_info[,c("Habitat", "Genus_species")], by = "Genus_species") %>% distinct()
+```
+
+
+Model syntax:
+
+```{r}
+pc30_me_formula <- brms::bf(formula = Habitat ~ 1 + me(Comp1_mean,Comp1_se) + me(Comp2_mean,Comp2_se) + me(Comp3_mean,Comp3_se) + me(Comp4_mean,Comp4_se) + me(Comp5_mean,Comp5_se) + me(Comp6_mean,Comp6_se) +me(Comp7_mean,Comp7_se) + me(Comp8_mean,Comp8_se) + me(Comp9_mean,Comp9_se) + me(Comp10_mean,Comp10_se) + me(Comp11_mean,Comp11_se) + me(Comp12_mean,Comp12_se) + me(Comp13_mean,Comp13_se) + me(Comp14_mean,Comp14_se) + me(Comp15_mean,Comp15_se) + me(Comp16_mean,Comp16_se) + me(Comp17_mean,Comp17_se) + me(Comp18_mean,Comp18_se) + me(Comp19_mean,Comp19_se) + me(Comp20_mean,Comp20_se) + me(Comp21_mean,Comp21_se) + me(Comp22_mean,Comp22_se) + me(Comp23_mean,Comp23_se) + me(Comp24_mean,Comp24_se) + me(Comp25_mean,Comp25_se) + me(Comp26_mean,Comp26_se) + me(Comp27_mean,Comp27_se) + me(Comp28_mean,Comp28_se) + me(Comp29_mean,Comp29_se) + me(Comp30_mean,Comp30_se))
+```
+
+What should the priors be?
+```{r}
+get_prior(formula = pc30_me_formula, data = species_summary, family = cumulative)
+```
+Run with some weak priors first, then try changing:
+```{r}
+phylo_model_v5_prior <- brm(data = species_summary,
+                      family = cumulative,
+                      formula = pc30_me_formula,
+                      prior = c(prior(normal(0, 1.5), class = Intercept),
+                                prior(normal(0,0.5), class = b),
+                                prior(normal(0,0.5), class = meanme),
+                                prior(exponential(1), class = sdme),
+                                prior(lkj(2), class = corme)),
+                      iter = 3000, warmup = 1500, cores = 4, chains = 4,
+                      control = list(adapt_delta = 0.99),
+                      sample_prior = "only",
+                      seed = 2375,
+                      file = "models/phylo_model_v5_prior")
+
+phylo_model_v5_prior
+```
+
+
+
+## Summary
+
+Predictions of models using first 30 PCs and accounting for species/phylogeny in different ways:
+
+```{r, fig.width=12, fig.height=8, echo=F}
+((pc_model_v5_wsum_plot | phylo_model_v1_wsum_plot | phylo_model_v2_wsum_plot | phylo_model_v3_wsum_plot) + plot_layout(guides = "collect", axis_titles = "collect_y")) / ((predicted_hab_histo_pc_v5 | predicted_hab_histo_phylo_v1 | predicted_hab_histo_phylo_v2 | predicted_hab_histo_phylo_v3 ) + plot_layout(guides = "collect", axis_titles = "collect_y"))
+```
+
+In the PC-only model, the weighted sums blend into each other, and the distinction is especially blurry with heavy cover and forest. Some of the individuals classified as forest have weighted sums that are much closer to 3 than 4, suggesting that there's not a lot of certainty in those predictions. Adding a phylogenetic effect and/or a species term makes the distinctions much clearer among groups, and the probabilities cluster much tighter around each other. This highlights that the phylogenetic covariate has really strong predictive power, but also suggests that to apply a model that includes a phylogeny to data that lacks a species identification might make worse predictions than a model that doesn't include phylogeny at all, as the PC coefficients have weaker effects with wider compatibility intervals in the phylogenetic models. 
+
+But, the informative PCs from the non-phylogenetic model still have some effect in the phylogenetic model, which does indicate some independent habitat signal in these variables. 
+
+```{r, fig.width=12, fig.height=8, echo=F}
+(coeffs_v5_plot | coeffs_phylo_v1_plot | coeffs_phylo_v2_plot | coeffs_phylo_v3_plot) +
+  plot_layout(axes = "collect_x")
+```
+
+In the phylogenetic models, though, the species coefficients are carrying the majority of the predictive power. The effect sizes on the x-axis on the plots below are much greater than that of any of the PC effects. 
+
+```{r, fig.height=8, fig.width=16, echo=F}
+(species_coeffs_v1_plot | phylo_species_coeffs_v2_plot | species_coeffs_v3_plot) + plot_layout(axes = "collect_x", guides = "collect")
+```
+
+
+
