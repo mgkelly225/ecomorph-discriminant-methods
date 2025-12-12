@@ -29,8 +29,8 @@ source(file = "code/gm_analysis_plotting_functions.R", local = TRUE) # edit this
 ## Import the data:
 ```{r}
 # Astragalus PCA: all individuals
-PCA_all_astragali <- readRDS("out/astragali_pca_results_2025-10-29.rds")
-all_astragali_info <- read.csv("out/modern_astragali_post_gm_2025-10-29.csv")
+PCA_all_astragali <- readRDS("data/astragali_pca_results_2025-10-29.rds")
+all_astragali_info <- read.csv("data/modern_astragali_post_gm_2025-10-29.csv")
 
 # Landmark coordinates of all astragali
 GPA_arr <- readRDS(file = "data/landmark_coords_GPA_modern_data2025-11-07.rds")
@@ -95,7 +95,8 @@ cva_1v2_all_pcs <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("CV1 (60.2%)")+
-  ylab("CV2 (24.1%)")
+  ylab("CV2 (24.1%)")+
+  ggtitle("PCs 1-53")
 
 hull_cva_23 <- C_info %>% group_by(Habitat) %>%
   slice(chull(LD2, LD3))
@@ -176,7 +177,8 @@ cva_1v2_95 <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("CV1 (71.5%)")+
-  ylab("CV2 (17.3%)")
+  ylab("CV2 (17.3%)")+
+  ggtitle("PCs 1-30")
 
 hull_cva_23_95 <- C_95_info %>% group_by(Habitat) %>%
   slice(chull(LD2, LD3))
@@ -261,7 +263,8 @@ cva_1v2_bs <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("CV1 (88.7%)")+
-  ylab("CV2 (8.9%)")
+  ylab("CV2 (8.9%)")+
+  ggtitle("PCs 1-8")
 
 hull_cva_23_bs <- C_bs_info %>% group_by(Habitat) %>%
   slice(chull(LD2, LD3))
@@ -295,7 +298,7 @@ ggsave("figures/astragalus_cva_broken_stick.png", height = 12, width = 8)
 ```
 
 ```{r, fig.height=12, fig.width=18}
-((cva_1v2_all_pcs | cva_1v2_95 | cva_1v2_bs) / (cva_1v3_all_pcs | cva_1v3_95 | cva_1v3_bs)) +
+((cva_1v2_bs | cva_1v2_95 | cva_1v2_all_pcs) / (cva_1v3_bs | cva_1v3_95 | cva_1v3_all_pcs)) +
   plot_layout(axis_titles = "collect", guides = "collect")
 ggsave("figures/cva_all_individuals_comparison.png", height = 12, width = 18)
 ```
@@ -388,7 +391,8 @@ cva_sp_1v2 <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("CV1 (55.7%)")+
-  ylab("CV2 (24.3%)")
+  ylab("CV2 (24.3%)")+
+  ggtitle("PCs 1-35")
 
 hull_dfa_sp_13 <- C_sp_info %>% group_by(Habitat) %>%
   slice(chull(LD1, LD3))
@@ -472,7 +476,8 @@ cva_sp_95_1v2 <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("CV1 (69.0%)")+
-  ylab("CV2 (18.4%)")
+  ylab("CV2 (18.4%)")+
+  ggtitle("PCs 1-19")
 
 hull_dfa_sp_95_13 <- C_sp_95_info %>% group_by(Habitat) %>%
   slice(chull(LD1, LD3))
@@ -557,7 +562,8 @@ cva_sp_bs_1v2 <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("CV1 (97.9%)")+
-  ylab("CV2 (2.1%)")
+  ylab("CV2 (2.1%)")+
+  ggtitle("PCs 1-2")
 ```
 
 ```{r, fig.height=6, fig.width=8}
@@ -566,16 +572,159 @@ ggsave("figures/astragalus_cva_sp_means_bs.png", height = 6, width = 8)
 ```
 
 ```{r, fig.height=12, fig.width=18}
-cva_sp_1v2 + cva_sp_95_1v2 + cva_sp_bs_1v2 + cva_sp_1v3 + cva_sp_95_1v3 + guide_area() + plot_layout(nrow = 2, guides = "collect", axis_titles = "collect")
+cva_sp_bs_1v2 + cva_sp_95_1v2 + cva_sp_1v2 + guide_area() + cva_sp_95_1v3 + cva_sp_1v3  + plot_layout(nrow = 2, guides = "collect")
 ggsave("figures/cva_species_means_comparison.png", height = 12, width = 18)
 ```
 
+## CVA: species means, slightly reducing the number of PCs?
+Try to get rid of multicollinearity issue
+
+### PCs 1-34?
+```{r}
+#conduct the CVA (without cross-validation):
+cvaresults_sp_34 <- lda(species_PC_scores_scaled[,1:34], cvagrps_sp, CV=FALSE)
+A_sp_34 <- cvaresults_sp_34$scaling
+grpmeans_sp_34 <- cvaresults_sp_34$means
+
+#project specimens onto LD1
+C_sp_34 <- species_PC_scores_scaled[,1:34]%*%A_sp_34
+
+#make this easier to visualize
+C_sp_34_info <- data.frame(LD1 = C_sp_34[,1],
+                     LD2 = C_sp_34[,2],
+                     LD3 = C_sp_34[,3],
+                     Habitat = species_df$Habitat,
+                     Tribe = species_df$Tribe)
+
+#conduct CVA with leave-one-out cross-validation of group membership:
+cvaresultsCV_sp_34 <- lda(species_PC_scores_scaled[,1:34], cvagrps_sp, CV=TRUE)
+crossval_sp_34 <- table(cvagrps_sp, cvaresultsCV_sp_34$class) # confusion matrix of specimen assignments
+diag(prop.table(crossval_sp_34, 1)) # percent correct per group
+sum(diag(prop.table(crossval_sp_34))) # total percent correct
+
+#for a fancier table
+altcrossval_sp_34 <- rbind(crossval_sp_34[1,]/sum(crossval_sp_34[1,]), crossval_sp_34[2,]/sum(crossval_sp_34[2,]), crossval_sp_34[3,]/sum(crossval_sp_34[3,]), crossval_sp_34[4,]/sum(crossval_sp_34[4,]))
+dimnames(altcrossval_sp_34) <- list("Actual"=c("F", "HC", "LC", "O"), "Predicted (CV)"=c("F", "HC", "LC", "O"))
+print(round(altcrossval_sp_34, 3))
+
+# proportion of variance explained by each CV axis
+cvaresults_sp_34$svd^2 / sum(cvaresults_sp_34$svd^2)
+```
+Still gives multicollinearity warning
+
+### PCs 1-33?
+```{r}
+#conduct the CVA (without cross-validation):
+cvaresults_sp_33 <- lda(species_PC_scores_scaled[,1:33], cvagrps_sp, CV=FALSE)
+A_sp_33 <- cvaresults_sp_33$scaling
+grpmeans_sp_33 <- cvaresults_sp_33$means
+
+#project specimens onto LD1
+C_sp_33 <- species_PC_scores_scaled[,1:33]%*%A_sp_33
+
+#make this easier to visualize
+C_sp_33_info <- data.frame(LD1 = C_sp_33[,1],
+                     LD2 = C_sp_33[,2],
+                     LD3 = C_sp_33[,3],
+                     Habitat = species_df$Habitat,
+                     Tribe = species_df$Tribe)
+
+#conduct CVA with leave-one-out cross-validation of group membership:
+cvaresultsCV_sp_33 <- lda(species_PC_scores_scaled[,1:33], cvagrps_sp, CV=TRUE)
+crossval_sp_33 <- table(cvagrps_sp, cvaresultsCV_sp_33$class) # confusion matrix of specimen assignments
+diag(prop.table(crossval_sp_33, 1)) # percent correct per group
+sum(diag(prop.table(crossval_sp_33))) # total percent correct
+
+#for a fancier table
+altcrossval_sp_33 <- rbind(crossval_sp_33[1,]/sum(crossval_sp_33[1,]), crossval_sp_33[2,]/sum(crossval_sp_33[2,]), crossval_sp_33[3,]/sum(crossval_sp_33[3,]), crossval_sp_33[4,]/sum(crossval_sp_33[4,]))
+dimnames(altcrossval_sp_33) <- list("Actual"=c("F", "HC", "LC", "O"), "Predicted (CV)"=c("F", "HC", "LC", "O"))
+print(round(altcrossval_sp_33, 3))
+
+# proportion of variance explained by each CV axis
+cvaresults_sp_33$svd^2 / sum(cvaresults_sp_33$svd^2)
+```
+Same problem.
+
+### PCs 1-32?
+```{r}
+#conduct the CVA (without cross-validation):
+cvaresults_sp_32 <- lda(species_PC_scores_scaled[,1:32], cvagrps_sp, CV=FALSE)
+A_sp_32 <- cvaresults_sp_32$scaling
+grpmeans_sp_32 <- cvaresults_sp_32$means
+
+#project specimens onto LD1
+C_sp_32 <- species_PC_scores_scaled[,1:32]%*%A_sp_32
+
+#make this easier to visualize
+C_sp_32_info <- data.frame(LD1 = C_sp_32[,1],
+                     LD2 = C_sp_32[,2],
+                     LD3 = C_sp_32[,3],
+                     Habitat = species_df$Habitat,
+                     Tribe = species_df$Tribe)
+
+#conduct CVA with leave-one-out cross-validation of group membership:
+cvaresultsCV_sp_32 <- lda(species_PC_scores_scaled[,1:32], cvagrps_sp, CV=TRUE)
+crossval_sp_32 <- table(cvagrps_sp, cvaresultsCV_sp_32$class) # confusion matrix of specimen assignments
+diag(prop.table(crossval_sp_32, 1)) # percent correct per group
+sum(diag(prop.table(crossval_sp_32))) # total percent correct
+
+#for a fancier table
+altcrossval_sp_32 <- rbind(crossval_sp_32[1,]/sum(crossval_sp_32[1,]), crossval_sp_32[2,]/sum(crossval_sp_32[2,]), crossval_sp_32[3,]/sum(crossval_sp_32[3,]), crossval_sp_32[4,]/sum(crossval_sp_32[4,]))
+dimnames(altcrossval_sp_32) <- list("Actual"=c("F", "HC", "LC", "O"), "Predicted (CV)"=c("F", "HC", "LC", "O"))
+print(round(altcrossval_sp_32, 3))
+
+# proportion of variance explained by each CV axis
+cvaresults_sp_32$svd^2 / sum(cvaresults_sp_32$svd^2)
+```
+```{r}
+hull_dfa_sp_32_12 <- C_sp_32_info %>% group_by(Habitat) %>%
+  slice(chull(LD1, LD2))
+cva_sp_32_1v2 <- ggplot()+
+  geom_polygon(data = hull_dfa_sp_32_12, aes(x = LD1, y = LD2, color = Habitat, fill = Habitat), linewidth = 1, alpha = 0.2)+
+  geom_point(data = C_sp_32_info, mapping = aes(x = LD1, y = LD2, color = Habitat, shape = Tribe), size = 3)+
+  scale_color_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"))+
+  scale_fill_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"))+
+  tribe_shapes() +
+  theme_classic(base_size = 22) +
+  xlab("CV1 (86.0%)")+
+  ylab("CV2 (11.0%)")+
+  ggtitle("PCs 1-32")
+
+hull_dfa_sp_32_13 <- C_sp_32_info %>% group_by(Habitat) %>%
+  slice(chull(LD1, LD3))
+cva_sp_32_1v3 <- ggplot()+
+  geom_polygon(data = hull_dfa_sp_32_13, aes(x = LD1, y = LD3, color = Habitat, fill = Habitat), linewidth = 1, alpha = 0.2)+
+  geom_point(data = C_sp_32_info, mapping = aes(x = LD1, y = LD3, color = Habitat, shape = Tribe), size = 3)+
+  scale_color_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"))+
+  scale_fill_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"))+
+  tribe_shapes() +
+  theme_classic(base_size = 22) +
+  xlab("CV1 (86.0%)")+
+  ylab("CV3 (3.0%)")
+
+hull_dfa_sp_32_23 <- C_sp_32_info %>% group_by(Habitat) %>%
+  slice(chull(LD2, LD3))
+cva_sp_32_2v3 <- ggplot()+
+  geom_polygon(data = hull_dfa_sp_32_23, aes(x = LD2, y = LD3, color = Habitat, fill = Habitat), linewidth = 1, alpha = 0.2)+
+  geom_point(data = C_sp_32_info, mapping = aes(x = LD2, y = LD3, color = Habitat, shape = Tribe), size = 3)+
+  scale_color_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"))+
+  scale_fill_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"))+
+  tribe_shapes() +
+  theme_classic(base_size = 22) +
+  xlab("CV2 (11.0%)")+
+  ylab("CV3 (3.0%)")
+```
+
+```{r, fig.height=12, fig.width=18}
+cva_sp_bs_1v2 + cva_sp_95_1v2 + cva_sp_32_1v2 + guide_area() + cva_sp_95_1v3 + cva_sp_32_1v3  + plot_layout(nrow = 2, guides = "collect")
+ggsave("figures/cva_species_means_comparison_v2.png", height = 12, width = 18)
+```
 
 ## PFDA: species means, all PCs
 
 ```{r}
 # functions for pFDA from Motani & Schmitz 2011
-source(file = "phyloFDA-master/phylo.fda.v0.2.R", local = TRUE)
+source(file = "code/phylo.fda.v0.2.R", local = TRUE)
 ```
 
 ```{r}
@@ -616,6 +765,7 @@ pfda_all <- phylo.fda(X_all, habs, zurano_tree, val = optl_all, treetrans = resc
 # how well did pFDA perform?
 pfda_all$confusion 
 ```
+
 ```{r all PCs cross-validation}
 # use un-scaled species mean PC scores for this
 X_all_cv <- signif(species_PC_scores, 4)
@@ -679,7 +829,8 @@ pdfa_1v2_all <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("DA1")+
-  ylab("DA2")
+  ylab("DA2")+
+  ggtitle(expression(paste("PCs 1-35, optimal ", lambda, " = 0.46")))
 
 hull_pfda_13_all <- training.results.all %>% group_by(`true class`) %>%
   slice(chull(DA1, DA3))
@@ -711,6 +862,126 @@ pfda_2v3_all <- ggplot()+
 ggsave("figures/astragalus_pfda_all_pcs.png", height = 12, width = 8)
 ```
 
+## PFDA: species means, first 32 PCs 
+(no multicollinearity here)
+
+```{r}
+# select the PCs first
+X_32 <- signif(species_PC_scores_scaled[,1:32],4)
+```
+
+```{r}
+# optimal lambda
+optLambda(X_32,habs,zurano_tree)
+```
+
+```{r perform the discriminant analysis}
+pri  <- c(0.25, 0.25, 0.25, 0.25) # The prior probabilities will vary with your datasets. Replace by equal priors if unknown. (e.g., if 4 groups, just use 0.25 for each if unknown)
+optl_32 <- 0 # Replace with the optimal lambda value from above.
+pfda_32 <- phylo.fda(X_32, habs, zurano_tree, val = optl_32, treetrans = rescale, priin = pri) # just run using the training data
+```
+
+```{r cross-classification matrix}
+# how well did pFDA perform?
+pfda_32$confusion 
+```
+
+```{r leave one out cross validation for pc1-32}
+# use un-scaled species mean PC scores for this
+X_32_cv <- signif(species_PC_scores[,1:32], 4)
+
+pfda_astrag_cv_32 <- data.frame(matrix(ncol=9, nrow = 0))
+colnames(pfda_astrag_cv_32) <- c("true class" ,"predicted class", "P(F)", "P(HC)", "P(LC)", "P(O)", "DA1", "DA2", "DA3")
+pfda_astrag_cv_32 <- pfda_astrag_cv_32 %>% mutate_if(is.logical, as.character)
+
+for (i in 1:nrow(X_32_cv)) {
+  test_taxon <- rownames(X_32_cv)[i] # which taxon to leave out
+  training_taxa <- rownames(X_32_cv)[-i] # which taxa are the training set (remainder)
+  x_train <- X_32_cv[-i,] # matrix of data for training taxa
+  habs_train <- habs[-i] # habitats of training taxa 
+  tree_train <- drop.tip(zurano_tree, test_taxon) # tree minus test taxon
+  
+  pri_cv  <- c(0.25, 0.25, 0.25, 0.25) # The prior probabilities will vary with your datasets. Replace by equal priors if unknown.
+  optl_cv <- optl_32 # Replace with the maximum likelihood lambda 
+  pfda_cv <- phylo.fda.pred(dataA=X_32_cv, grpA=habs, taxtaxA=taxa, tretreA=zurano_tree, testlistn=i, val=optl_cv, priin=pri_cv) # i represents the row number of the species left out. could also be a vector of row numbers if needed
+  
+  test_class <- as.character(predict.phylo.fda(pfda_cv, pfda_cv$DATAtest, type="class")) # predicted group membership for test taxon
+  test_variates <- predict.phylo.fda(pfda_cv, pfda_cv$DATAtest, type="variates") # discriminant score for test taxon
+  test_prob <- predict.phylo.fda(pfda_cv, pfda_cv$DATAtest, type="posterior") # posterior probabilities of group membership for test taxon
+  test_results <- as.data.frame(cbind(habs[i],test_class, test_prob, test_variates))
+  colnames(test_results) <- c("true class","predicted class", "P(F)", "P(HC)", "P(LC)", "P(O)", "DA1", "DA2", "DA3")
+  rownames(test_results) <- test_taxon
+
+  pfda_astrag_cv_32 <- bind_rows(pfda_astrag_cv_32, test_results) # stick new result onto vector of results
+}
+
+crossval_pfda_32 <- table(pfda_astrag_cv_32$`true class`, pfda_astrag_cv_32$`predicted class`)
+prop.table(crossval_pfda_32, 1)
+diag(prop.table(crossval_pfda_32, 1)) # percent correct per group
+sum(diag(prop.table(crossval_pfda_32))) # total percent correct
+```
+
+
+```{r evaluate pFDA performance on training data only}
+training.class.32 <- as.character(predict(pfda_32, pfda_32$DATA, type="class"))
+training.variates.32 <- predict(pfda_32, pfda_32$DATA, type="variates")
+training.prob.32 <- predict(pfda_32, pfda_32$DATA, type="posterior")
+training.results.32 <- cbind(as.character(habs), training.class.32, training.prob.32, training.variates.32)
+colnames(training.results.32) <- c("true class", "predicted class", "P(F)", "P(HC)", "P(LC)", "P(O)", "DA1", "DA2", "DA3")
+rownames(training.results.32) <- taxa
+```
+
+```{r plot the results}
+training.results.32 <- as.data.frame(training.results.32)
+training.results.32$DA1 <- as.numeric(training.results.32$DA1)
+training.results.32$DA2 <- as.numeric(training.results.32$DA2)
+training.results.32$DA3 <- as.numeric(training.results.32$DA3)
+training.results.32 <- cbind(training.results.32, species_df$Tribe)
+colnames(training.results.32)[colnames(training.results.32) == "species_df$Tribe"] <- "Tribe"
+
+hull_pfda_12_32 <- training.results.32 %>% group_by(`true class`) %>%
+  slice(chull(DA1, DA2))
+pdfa_1v2_32 <- ggplot()+
+  geom_polygon(data = hull_pfda_12_32, aes(x = DA1, y = DA2, color = `true class`, fill = `true class`), linewidth = 1, alpha = 0.2)+
+  geom_point(data = training.results.32, mapping = aes(x = DA1, y = DA2, color = `true class`, shape = Tribe), size = 3)+
+  scale_fill_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"), name = "Habitat")+
+  scale_color_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"), name = "Habitat")+
+  tribe_shapes() +
+  theme_classic(base_size = 22) +
+  xlab("DA1")+
+  ylab("DA2")+
+  ggtitle(expression(paste("PCs 1-32, optimal ", lambda, " = 0")))
+
+hull_pfda_13_32 <- training.results.32 %>% group_by(`true class`) %>%
+  slice(chull(DA1, DA3))
+pfda_1v3_32 <- ggplot()+
+  geom_polygon(data = hull_pfda_13_32, aes(x = DA1, y = DA3, color = `true class`, fill = `true class`), linewidth = 1, alpha = 0.2)+
+  geom_point(data = training.results.32, mapping = aes(x = DA1, y = DA3, color = `true class`, shape = Tribe), size = 3)+
+  scale_fill_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"), name = "Habitat")+
+  scale_color_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"), name = "Habitat")+
+  tribe_shapes() +
+  theme_classic(base_size = 22) +
+  xlab("DA1")+
+  ylab("DA3")
+
+hull_pfda_23_32 <- training.results.32 %>% group_by(`true class`) %>%
+  slice(chull(DA2, DA3))
+pfda_2v3_32 <- ggplot()+
+  geom_polygon(data = hull_pfda_23_32, aes(x = DA2, y = DA3, color = `true class`, fill = `true class`), linewidth = 1, alpha = 0.2)+
+  geom_point(data = training.results.32, mapping = aes(x = DA2, y = DA3, color = `true class`, shape = Tribe), size = 3)+
+  scale_fill_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"), name = "Habitat")+
+  scale_color_brewer(palette = "BrBG", direction = -1, labels = c("Forest", "Heavy Cover", "Light Cover", "Open"), name = "Habitat")+
+  tribe_shapes() +
+  theme_classic(base_size = 22) +
+  xlab("DA2")+
+  ylab("DA3")
+```
+
+```{r, fig.height=12, fig.width=8}
+( pdfa_1v2_32 / pfda_1v3_32 ) + plot_layout(axis_titles = "collect", guides = "collect") 
+ggsave("figures/astragalus_pfda_32pcs.png", height = 12, width = 8)
+```
+
 ## PFDA: species means, 95% of variance PCs
 
 Same as the CVA with 95% of variance PCs, we'll use PCs 1-19 here.
@@ -735,6 +1006,7 @@ pfda_95 <- phylo.fda(X_95, habs, zurano_tree, val = optl_95, treetrans = rescale
 # how well did pFDA perform?
 pfda_95$confusion 
 ```
+
 ```{r leave one out cross validation for pc1-19}
 # use un-scaled species mean PC scores for this
 X_95_cv <- signif(species_PC_scores[,1:19], 4)
@@ -798,7 +1070,8 @@ pdfa_1v2_95 <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("DA1")+
-  ylab("DA2")
+  ylab("DA2")+
+  ggtitle(expression(paste("PCs 1-19, optimal ", lambda, " = 0")))
 
 hull_pfda_13_95 <- training.results.95 %>% group_by(`true class`) %>%
   slice(chull(DA1, DA3))
@@ -843,6 +1116,7 @@ X_bs <- signif(species_PC_scores_scaled[,1:2],4)
 # optimal lambda
 optLambda(X_bs,habs,zurano_tree)
 ```
+
 ```{r perform the discriminant analysis}
 pri  <- c(0.25, 0.25, 0.25, 0.25) # The prior probabilities will vary with your datasets. Replace by equal priors if unknown. (e.g., if 4 groups, just use 0.25 for each if unknown)
 optl_bs <- 0.13 # Replace with the optimal lambda value from above.
@@ -915,7 +1189,8 @@ pdfa_1v2_bs <- ggplot()+
   tribe_shapes() +
   theme_classic(base_size = 22) +
   xlab("DA1")+
-  ylab("DA2")
+  ylab("DA2")+
+  ggtitle(expression(paste("PCs 1-2, optimal ", lambda, " = 0.13")))
 ```
 
 ```{r, fig.height=6, fig.width=8}
@@ -925,8 +1200,11 @@ ggsave("figures/astragalus_pfda_bs_pcs.png", height = 6, width = 8)
 
 
 ```{r, fig.height=12, fig.width=18}
-pdfa_1v2_all + pdfa_1v2_95 + pdfa_1v2_bs + pfda_1v3_all + pfda_1v3_95 + guide_area() + plot_layout(nrow = 2, guides = "collect")
+pdfa_1v2_bs + pdfa_1v2_95 + pdfa_1v2_all + guide_area() + pfda_1v3_95 + pfda_1v3_all + plot_layout(nrow = 2, guides = "collect")
 ggsave("figures/pfda_comparison.png", height = 12, width = 18)
 ```
 
-
+```{r, fig.height=12, fig.width=18}
+pdfa_1v2_bs + pdfa_1v2_95 + pdfa_1v2_32 + guide_area() + pfda_1v3_95 + pfda_1v3_32 + plot_layout(nrow = 2, guides = "collect")
+ggsave("figures/pfda_comparison_v2.png", height = 12, width = 18)
+```
